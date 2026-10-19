@@ -117,7 +117,8 @@ enum Converter {
     }
 
     /// `quality`: lossy image quality, or for video the target size as a fraction of the original (1 = no cap).
-    static func convert(_ source: Source, to ext: String, scale: Double, quality: Double,
+    /// `speed`: playback multiplier for audio/video.
+    static func convert(_ source: Source, to ext: String, scale: Double, quality: Double, speed: Double = 1,
                         started: (Process) -> Void = { _ in }, progress: @escaping (Double) -> Void = { _ in }) throws -> URL {
         guard let route = Formats.route(source, to: ext) else { throw ConvertError("Can't convert .\(source.ext) to .\(ext).") }
         let out = destination(for: source.url, ext: ext)
@@ -132,10 +133,10 @@ enum Converter {
                 try Tool.run(URL(fileURLWithPath: "/usr/bin/textutil"), ["-convert", ext, "-output", out.path, source.url.path])
             case .ffmpeg:
                 let args = ffmpegArgs(input: source.url.path, output: out.path, ext: ext, width: source.pixels.width,
-                                      scale: scale, videoKbps: videoKbps(source, fraction: quality))
+                                      scale: scale, speed: speed, videoKbps: videoKbps(source, fraction: quality, speed: speed))
                 try Tool.run(Tool.find("ffmpeg"), args, started: started) { line in
                     if source.duration > 0, line.hasPrefix("out_time_us="), let us = Double(line.dropFirst(12)) {
-                        progress(min(1, us / 1e6 / source.duration))
+                        progress(min(1, us / 1e6 / (source.duration / speed)))
                     }
                 }
             }
@@ -146,33 +147,38 @@ enum Converter {
         return out
     }
 
-    static func videoKbps(_ source: Source, fraction: Double) -> Int? {
+    static func videoKbps(_ source: Source, fraction: Double, speed: Double = 1) -> Int? {
         guard fraction < 1, source.duration > 0 else { return nil }
-        let totalKbps = Double(source.bytes) * fraction * 8 / source.duration / 1000
+        let totalKbps = Double(source.bytes) * fraction * 8 / (source.duration / speed) / 1000
         return max(64, Int(totalKbps) - 128) // 128k reserved for audio
     }
 
-    static func ffmpegArgs(input: String, output: String, ext: String, width: Double, scale: Double, videoKbps: Int?) -> [String] {
+    static func ffmpegArgs(input: String, output: String, ext: String, width: Double, scale: Double, speed: Double = 1,
+                           videoKbps: Int?) -> [String] {
         var args = ["-hide_banner", "-v", "error", "-y", "-i", input, "-progress", "pipe:1", "-nostats"]
-        let scaleFilter = scale < 1 ? ["-vf", "scale=trunc(iw*\(scale)/2)*2:-2"] : []
+        let retime = speed != 1 ? ["setpts=PTS/\(speed)"] : []
+        let videoFilters = retime + (scale < 1 ? ["scale=trunc(iw*\(scale)/2)*2:-2"] : [])
+        let audio = speed != 1 ? ["-af", "atempo=\(speed)"] : [] // atempo takes 0.5–100
+        let filters = (videoFilters.isEmpty ? [] : ["-vf", videoFilters.joined(separator: ",")]) + audio
         let rate = videoKbps.map { ["-b:v", "\($0)k", "-maxrate", "\($0 * 3 / 2)k", "-bufsize", "\($0 * 2)k"] }
         switch ext {
         case "mp4", "mov", "m4v", "mkv":
-            args += scaleFilter + ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"] + (rate ?? ["-crf", "23"])
+            args += filters + ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"] + (rate ?? ["-crf", "23"])
             args += ["-c:a", "aac", "-b:a", "128k"] + (ext == "mkv" ? [] : ["-movflags", "+faststart"])
         case "webm":
-            args += scaleFilter + ["-c:v", "libvpx-vp9", "-row-mt", "1", "-cpu-used", "4"] + (rate ?? ["-crf", "32", "-b:v", "0"])
+            args += filters + ["-c:v", "libvpx-vp9", "-row-mt", "1", "-cpu-used", "4"] + (rate ?? ["-crf", "32", "-b:v", "0"])
             args += ["-c:a", "libopus", "-b:a", "128k"]
         case "gif":
             // ponytail: capped at 800px wide and 12 fps so GIFs stay shareable; expose if someone needs more.
             let w = Int(min(width > 0 ? width * scale : 800, 800)) / 2 * 2
-            args += ["-vf", "fps=12,scale=\(w):-2:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse", "-loop", "0"]
-        case "mp3": args += ["-vn", "-c:a", "libmp3lame", "-q:a", "2"]
-        case "m4a", "aac": args += ["-vn", "-c:a", "aac", "-b:a", "192k"]
-        case "ogg": args += ["-vn", "-c:a", "libvorbis", "-q:a", "5"]
-        case "opus": args += ["-vn", "-c:a", "libopus", "-b:a", "128k"]
-        case "wav", "flac", "aiff": args += ["-vn"]
-        default: args += scaleFilter // anything else typed: let ffmpeg pick codecs for the container
+            let gif = retime + ["fps=12,scale=\(w):-2:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse"]
+            args += ["-vf", gif.joined(separator: ","), "-loop", "0"]
+        case "mp3": args += audio + ["-vn", "-c:a", "libmp3lame", "-q:a", "2"]
+        case "m4a", "aac": args += audio + ["-vn", "-c:a", "aac", "-b:a", "192k"]
+        case "ogg": args += audio + ["-vn", "-c:a", "libvorbis", "-q:a", "5"]
+        case "opus": args += audio + ["-vn", "-c:a", "libopus", "-b:a", "128k"]
+        case "wav", "flac", "aiff": args += audio + ["-vn"]
+        default: args += filters // anything else typed: let ffmpeg pick codecs for the container
         }
         return args + [output]
     }

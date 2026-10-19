@@ -54,6 +54,11 @@ enum SelfTest {
             check(video.kind == .video && video.duration > 1.5 && video.pixels.width == 320, "mp4 probed: \(video.summary)")
             for ext in ["mov", "webm", "gif", "mp3"] { convert(video, ext) }
             convert(video, "mp4", scale: 0.5, quality: 0.5)
+            for ext in ["mp4", "mp3"] { // gif shares the same setpts filter
+                let fast = (try? Converter.convert(video, to: ext, scale: 1, quality: 1, speed: 2)).flatMap(Source.init(url:))
+                let seconds = fast?.duration ?? 0
+                check(abs(seconds - video.duration / 2) < 0.3, "2× \(ext) lasts \(seconds)s (from \(video.duration)s)")
+            }
             check(Formats.route(video, to: "flv") == .ffmpeg && Formats.route(video, to: "../x") == nil, "typed formats sanitized")
         } else {
             print("skip  ffmpeg not installed")

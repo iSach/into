@@ -10,6 +10,7 @@ final class ConvertModel: ObservableObject {
     @Published var scale = 1.0 { didSet { refreshPreview() } }
     @Published var imageQuality = 0.85 { didSet { refreshPreview() } }
     @Published var videoTarget = 1.0 { didSet { refreshPreview() } }
+    @Published var speed = 1.0 { didSet { refreshPreview() } }
     @Published private(set) var preview = ""
     @Published private(set) var progress: Double?
     @Published private(set) var error: String?
@@ -55,8 +56,8 @@ final class ConvertModel: ObservableObject {
         guard let ext = selected, compressible else { preview = ""; return }
         if source.kind == .video {
             guard ext != "gif" else { preview = ""; return }
-            if let kbps = Converter.videoKbps(source, fraction: videoTarget) {
-                preview = describe(Int64(Double(kbps + 128) * 1000 / 8 * source.duration))
+            if let kbps = Converter.videoKbps(source, fraction: videoTarget, speed: speed) {
+                preview = describe(Int64(Double(kbps + 128) * 1000 / 8 * source.duration / speed))
             } else {
                 preview = videoTarget < 1 ? "Size unknown" : "Original quality"
             }
@@ -86,10 +87,10 @@ final class ConvertModel: ObservableObject {
         guard !busy, let ext = selected else { return }
         progress = 0
         error = nil
-        let source = source, scale = compressible ? scale : 1, quality = quality
+        let source = source, scale = compressible ? scale : 1, quality = quality, speed = source.kind == .video ? speed : 1
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result {
-                try Converter.convert(source, to: ext, scale: scale, quality: quality,
+                try Converter.convert(source, to: ext, scale: scale, quality: quality, speed: speed,
                                       started: { process in DispatchQueue.main.async { self?.process = process } },
                                       progress: { value in DispatchQueue.main.async { self?.progress = value } })
             }
@@ -157,8 +158,20 @@ struct ConvertView: View {
                 Text("No converter for “\(model.query)”").font(.callout).foregroundStyle(.secondary)
             }
 
-            if model.compressible {
+            if model.compressible || model.source.kind == .video {
                 Divider()
+            }
+            if model.source.kind == .video {
+                Picker("Speed", selection: $model.speed) {
+                    Text("0.5×").tag(0.5)
+                    Text("1×").tag(1.0)
+                    Text("1.5×").tag(1.5)
+                    Text("2×").tag(2.0)
+                    Text("4×").tag(4.0)
+                }
+                .pickerStyle(.segmented)
+            }
+            if model.compressible {
                 Picker("Size", selection: $model.scale) {
                     Text("100%").tag(1.0)
                     Text("75%").tag(0.75)
